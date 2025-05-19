@@ -1,15 +1,16 @@
 import sys
+import asyncio
+from poke_env import RandomPlayer
 
 sys.path.append("../src")
 
-from poke_env import RandomPlayer
-from poke_env.data import GenData
+# Define the battle logic inside an async function
+async def main():
+    random_player = RandomPlayer()
+    second_player = RandomPlayer()
 
-# The RandomPlayer is a basic agent that makes decisions randomly,
-# serving as a starting point for more complex agent development.
-random_player = RandomPlayer()
-second_player = RandomPlayer()
+    await random_player.battle_against(second_player, n_battles=1)
 
-# The battle_against method initiates a battle between two players.
-# Here we are using asynchronous programming (await) to start the battle.
-await random_player.battle_against(second_player, n_battles=1)
+# Run the async function using asyncio
+if __name__ == "__main__":
+    asyncio.run(main())
