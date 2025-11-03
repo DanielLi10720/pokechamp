@@ -362,22 +362,30 @@ class LLMVGCPlayer(Player):
                     if pokemon.species not in already_chosen
                 ]
                 
-                print(f"DEBUG: Slot {idx} - Already chosen: {already_chosen}, Available: {[p.species for p in battle.available_switches[idx]]}, Filtered: {switches}")
+                #print(f"DEBUG: Slot {idx} - Already chosen: {already_chosen}, Available: {[p.species for p in battle.available_switches[idx]]}, Filtered: {switches}")
                 
                 # If no valid switches left, use first available
                 if not switches:
                     switches = [pokemon.species for pokemon in battle.available_switches[idx]]
                 
                 actions = [[], switches]  # No moves allowed when forced to switch
+
                 constraint_prompt_io = f'''You MUST switch. Choose the most suitable pokemon to switch. Your output MUST be a JSON like: {{"switch":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
-                
+                constraint_prompt_cot = f'''You MUST switch. Choose the most suitable pokemon to switch by thinking step by step.Your thought should no more than 4 sentences. Your output MUST be a JSON like: {{"switch":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
+                constraint_prompt_tot_1 = '''You MUST switch. Generate top-k (k<=3) best switch options. Your output MUST be a JSON like:{"option_1":{"action":"switch","target":"<switch_pokemon_name>"}, ..., "option_k":{"action":"switch","target":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
+                constraint_prompt_tot_2 = '''You MUST switch. Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
                 system_prompt, state_prompt, state_action_prompt = sim.prompt_translate(sim, battle, next_action=next_action, idx=idx)
-                state_prompt_io = state_prompt + state_action_prompt + constraint_prompt_io
-                
+                state_prompt_io = state_prompt + state_action_prompt + constraint_prompt_io 
+                state_prompt_cot = state_prompt + state_action_prompt + constraint_prompt_cot
+                state_prompt_tot_1 = state_prompt + state_action_prompt + constraint_prompt_tot_1
+                state_prompt_tot_2 = state_prompt + state_action_prompt + constraint_prompt_tot_2
                 retries = 10
                 if self.prompt_algo == "io":
-                    next_action[idx] = self.io(retries, system_prompt, state_prompt, "", constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx)
-                
+                    next_action[idx] = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx)
+                if self.prompt_algo == "sc":
+                    next_action[idx] = self.sc(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx)
+                if self.prompt_algo == "tot":
+                    next_action[idx] = self.tot(retries, system_prompt, state_prompt_tot_1, state_prompt_tot_2, state_action_prompt, battle, sim, actions=actions, idx=idx)
                 # SAFEGUARD 2: Validate that the chosen switch is valid and not duplicate
                 if next_action[idx] is not None and not isinstance(next_action[idx], DefaultBattleOrder):
                     if hasattr(next_action[idx], 'order') and isinstance(next_action[idx].order, Pokemon):
@@ -441,6 +449,9 @@ class LLMVGCPlayer(Player):
                 if len(switches) > 0:
                     #print(f"INFO: Pokemon fainted/None for slot {idx}, forcing switch selection only")
                     constraint_prompt_io = '''Choose the most suitable pokemon to switch. Your output MUST be a JSON like: {"switch":"<switch_pokemon_name>"}\n'''
+                    constraint_prompt_cot = '''Choose the most suitable pokemon to switch by thinking step by step.Your thought should no more than 4 sentences. Your output MUST be a JSON like: {{"switch":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
+                    constraint_prompt_tot_1 = '''You MUST switch. Generate top-k (k<=3) best switch options. Your output MUST be a JSON like:{"option_1":{"action":"switch","target":"<switch_pokemon_name>"}, ..., "option_k":{"action":"switch","target":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
+                    constraint_prompt_tot_2 = '''You MUST switch. Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
                 else:
                     #print(f"ERROR: Pokemon fainted/None but no switches available for slot {idx}, setting action to None")
                     next_action[idx] = None
@@ -450,10 +461,16 @@ class LLMVGCPlayer(Player):
                 #print(f"INFO: No switches available for slot {idx}, forcing move selection only")
                 constraint_prompt_io = f'''Choose the best action and your output MUST be a JSON like: {{"move":"<move_name>", "target":"<target_number>"}}{gimmick_output_format}
         Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
+                constraint_prompt_cot = f'''You MUST move. Choose the best action by thinking step by step.Your thought should no more than 4 sentences. Your output MUST be a JSON like: {{"move":"<move_name>", "target":"<target_number>"}}{gimmick_output_format}. Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
+                constraint_prompt_tot_1 = '''You MUST move. Generate top-k (k<=3) best move options. Your output MUST be a JSON like:{"option_1":{"action":"move","target":"<move_name>"}, ..., "option_k":{"action":"move","target":"<move_name>"}}. Available moves: {moves}\n'''
+                constraint_prompt_tot_2 = '''You MUST move. Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"move","target":"<move_name>"}}\n'''
             # If no moves are available but switches are available
             elif len(moves) == 0 and len(switches) > 0:
                 #print(f"INFO: No moves available for slot {idx}, forcing switch selection only")
                 constraint_prompt_io = '''Choose the most suitable pokemon to switch. Your output MUST be a JSON like: {"switch":"<switch_pokemon_name>"}\n'''
+                constraint_prompt_cot = '''Choose the most suitable pokemon to switch by thinking step by step.Your thought should no more than 4 sentences. Your output MUST be a JSON like: {{"switch":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
+                constraint_prompt_tot_1 = '''You MUST switch. Generate top-k (k<=3) best switch options. Your output MUST be a JSON like:{"option_1":{"action":"switch","target":"<switch_pokemon_name>"}, ..., "option_k":{"action":"switch","target":"<switch_pokemon_name>"}}. Available switches: {switches}\n'''
+                constraint_prompt_tot_2 = '''You MUST switch. Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
             # If neither moves nor switches are available (error state)
             elif len(moves) == 0 and len(switches) == 0:
                 #print(f"ERROR: No moves or switches available for slot {idx}, setting action to None")
@@ -463,10 +480,14 @@ class LLMVGCPlayer(Player):
             else:
                 constraint_prompt_io = f'''Choose the best action and your output MUST be a JSON like: {{"move":"<move_name>", "target":"<target_number>"}}{gimmick_output_format} or {{"switch":"<switch_pokemon_name>"}}
 Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
-            
+                constraint_prompt_cot = f'''Choose the best action by thinking step by step. Your thought should no more than 4 sentences. Your output MUST be a JSON like: {{"move":"<move_name>", "target":"<target_number>"}}{gimmick_output_format} or {{"switch":"<switch_pokemon_name>"}}. Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self. Available switches: {switches}\n'''
+                constraint_prompt_tot_1 = '''You MUST move or switch. Generate top-k (k<=3) best move or switch options. Your output MUST be a JSON like:{"option_1":{"action":"move","target":"<move_name>"}, ..., "option_k":{"action":"move","target":"<move_name>"}} or {"option_1":{"action":"switch","target":"<switch_pokemon_name>"}, ..., "option_k":{"action":"switch","target":"<switch_pokemon_name>"}}. Available moves: {moves}. Available switches: {switches}\n'''
+                constraint_prompt_tot_2 = '''You MUST move or switch. Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"move","target":"<move_name>"}} or {"decision":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
 
             state_prompt_io = state_prompt + state_action_prompt + constraint_prompt_io
-            constraint_prompt_cot = ""
+            state_prompt_cot = state_prompt + state_action_prompt + constraint_prompt_cot
+            state_prompt_tot_1 = state_prompt + state_action_prompt + constraint_prompt_tot_1
+            state_prompt_tot_2 = state_prompt + state_action_prompt + constraint_prompt_tot_2
             #print(state_prompt_io)
 
             retries = 10
@@ -474,6 +495,10 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
             if self.prompt_algo == "io":
                 next_action[idx] = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx)
             # print("next_action:", next_action[idx])
+            if self.prompt_algo == "sc":
+                next_action[idx] = self.sc(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx)
+            if self.prompt_algo == "tot":
+                next_action[idx] = self.tot(retries, system_prompt, state_prompt_tot_1, state_prompt_tot_2, battle, sim, actions=actions, idx=idx)
 
         next_action = DoubleBattleOrder(first_order=next_action[0], second_order=next_action[1])
         print(next_action)
@@ -651,13 +676,62 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
             next_action = self.choose_max_damage_move(battle, idx=idx)
         return next_action
 
-    def sc(self, retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim):
-        actions = [self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim) for i in range(self.K)]
-        action_message = [action.message for action in actions]
+    def sc(self, retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=None, idx=0):
+        action_results = [self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx) for i in range(self.K)]
+        action_message = [action.message for action in action_results]
         _, counts = np.unique(action_message, return_counts=True)
         index = np.argmax(counts)
-        return actions[index]
+        return action_results[index]
     
+    def tot(self, retries, system_prompt, state_prompt_tot_1, state_prompt_tot_2, battle: Battle, sim, actions=None, idx=0):
+        llm_output1 = ""
+        next_action = None
+        for i in range(retries):
+            try:
+                llm_output1 = self.get_LLM_action(system_prompt=system_prompt,
+                                            user_prompt=state_prompt_tot_1,
+                                            model=self.backend,
+                                            temperature=self.temperature,
+                                            max_tokens=200,
+                                            json_format=True,
+                                            battle=battle)
+                break
+            except:
+                raise ValueError('No valid move', battle.active_pokemon.fainted, len(battle.available_switches))
+                continue    
+
+        if llm_output1 == "":
+            return self.choose_max_damage_move(battle)
+
+        for i in range(retries):
+            try:
+                llm_output2 = self.get_LLM_action(system_prompt=system_prompt,
+                                            user_prompt=state_prompt_tot_2.replace("[OPTIONS]", llm_output1),
+                                            model=self.backend,
+                                            temperature=self.temperature,
+                                            max_tokens=100,
+                                            json_format=True,
+                                            battle=battle)
+
+                next_action = self.parse_new(llm_output2, battle, sim)
+                with open(f"{self.log_dir}/output.jsonl", "a") as f:
+                    f.write(json.dumps({"turn": battle.turn,
+                                        "system_prompt": system_prompt,
+                                        "user_prompt1": state_prompt_tot_1,
+                                        "user_prompt2": state_prompt_tot_2,
+                                        "llm_output1": llm_output1,
+                                        "llm_output2": llm_output2,
+                                        "battle_tag": battle.battle_tag
+                                        }) + "\n")
+                if next_action is not None:     break
+            except:
+                raise ValueError('No valid move', battle.active_pokemon.fainted, len(battle.available_switches))
+                continue
+
+        if next_action is None:
+            next_action = self.choose_max_damage_move(battle)
+        return next_action
+
     def estimate_matchup(self, sim: LocalSim, battle: Battle, mon: Pokemon, mon_opp: Pokemon, is_opp: bool=False) -> Tuple[Move, int]:
         hp_remaining = []
         moves = list(mon.moves.keys())
