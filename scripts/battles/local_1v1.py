@@ -28,7 +28,7 @@ parser.add_argument("--player_backend", type=str, default="gemini-2.5-flash", ch
     # Anthropic models
     "anthropic/claude-3.5-sonnet", "anthropic/claude-3-opus", "anthropic/claude-3-haiku",
     # Google models
-    "google/gemini-pro", "gemini-2.0-flash", "gemini-2.0-pro", "gemini-2.0-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro",
+    "google/gemini-pro", "gemini-2.0-flash", "gemini-2.0-pro", "gemini-2.0-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
     # Meta models
     "meta-llama/llama-3.1-70b-instruct", "meta-llama/llama-3.1-8b-instruct",
     # Mistral models
@@ -73,7 +73,7 @@ parser.add_argument("--opponent_backend", type=str, default="gemini-2.5-pro", ch
     # Microsoft models
     "microsoft/wizardlm-2-8x22b", "microsoft/phi-3-medium-128k-instruct",
     # Local models (via OpenRouter)
-    "llama", 'None'
+    "llama", 'None', 'mcp'
 ])
 parser.add_argument("--opponent_name", type=str, default='pokellmon', choices=bot_choices)
 parser.add_argument("--opponent_device", type=int, default=0)
@@ -83,8 +83,17 @@ parser.add_argument("--temperature", type=float, default=0.3)
 parser.add_argument("--battle_format", default="gen9ou", choices=["gen8randombattle", "gen8ou", "gen9ou", "gen9randombattle", "gen9vgc2025regi"])
 parser.add_argument("--log_dir", type=str, default="./battle_log/one_vs_one")
 parser.add_argument("--N", type=int, default=25)
+parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
 
 args = parser.parse_args()
+
+# Set random seed if provided
+if args.seed is not None:
+    import random
+    import numpy as np
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    print(f"Using random seed: {args.seed}")
 
 async def main():
     # Visual banner for local battles
@@ -131,10 +140,7 @@ async def main():
             print(f"Falling back to static teams...")
     
     if not 'random' in args.battle_format:
-        if 'vgc' in args.battle_format:
-            player.update_team(load_random_team(id=None, vgc=True))
-            opponent.update_team(load_random_team(id=None, vgc=True))
-        elif player_teamloader is None or opponent_teamloader is None:
+        if player_teamloader is None or opponent_teamloader is None:
             # Fallback to static teams when metamon teams not available
             player.update_team(load_random_team(id=None, vgc=False))
             opponent.update_team(load_random_team(id=None, vgc=False))
