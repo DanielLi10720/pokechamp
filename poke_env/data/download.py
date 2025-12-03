@@ -11,7 +11,7 @@ VERSION_REFERENCE_PATH = None
 
 LATEST_RAW_REPLAY_REVISION = "v3"
 LATEST_PARSED_REPLAY_REVISION = "v3"
-LATEST_TEAMS_REVISION = "v3"
+LATEST_TEAMS_REVISION = "main"
 LATEST_USAGE_STATS_REVISION = "v1"
 
 METAMON_CACHE_DIR = os.getenv('METAMON_CACHE_DIR', '/tmp/metamon_cache')
@@ -118,14 +118,25 @@ def download_teams(
     teams_dir = os.path.join(METAMON_CACHE_DIR, "teams", set_name)
     tar_path = os.path.join(teams_dir, f"{battle_format}.tar.gz")
     extract_path = os.path.join(teams_dir, battle_format)
+    
+    # Check if files exist in extract_path (subfolder) or teams_dir (direct)
     if os.path.exists(extract_path):
         if not force_download:
             return extract_path
         print(f"Clearing existing dataset at {extract_path}...")
         shutil.rmtree(extract_path)
+    elif os.path.exists(teams_dir) and any(f.endswith(f".{battle_format}_team") for f in os.listdir(teams_dir) if os.path.isfile(os.path.join(teams_dir, f))):
+        # Files are directly in teams_dir (no subfolder)
+        if not force_download:
+            return teams_dir
+        # For force_download, we'll need to remove the files
+        print(f"Clearing existing dataset files in {teams_dir}...")
+        for f in os.listdir(teams_dir):
+            if f.endswith(f".{battle_format}_team"):
+                os.remove(os.path.join(teams_dir, f))
     hf_hub_download(
         cache_dir=os.path.join(METAMON_CACHE_DIR, "teams", set_name),
-        repo_id="jakegrigsby/metamon-teams",
+        repo_id="Daniel10720/pokechamp_vgc_teams",
         filename=f"{set_name}/{battle_format}.tar.gz",
         local_dir=os.path.join(METAMON_CACHE_DIR, "teams"),
         revision=version,
@@ -136,7 +147,16 @@ def download_teams(
         tar.extractall(path=os.path.dirname(extract_path))
     os.remove(tar_path)
     _update_version_reference("teams", f"{set_name}/{battle_format}", version)
-    return extract_path
+    
+    # Check if files were extracted to extract_path or directly to teams_dir
+    # (depends on whether tar contains a subfolder or not)
+    if os.path.exists(extract_path):
+        return extract_path
+    elif os.path.exists(teams_dir) and any(f.endswith(f".{battle_format}_team") for f in os.listdir(teams_dir) if os.path.isfile(os.path.join(teams_dir, f))):
+        # Files were extracted directly to teams_dir (no subfolder in tar)
+        return teams_dir
+    else:
+        raise ValueError(f"Could not locate extracted files for {battle_format} in {teams_dir} or {extract_path}")
 
     import argparse
     from termcolor import colored

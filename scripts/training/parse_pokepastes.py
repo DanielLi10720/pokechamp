@@ -74,11 +74,11 @@ def export_team_to_file(team_data: str, output_dir: str, team_number: int, battl
 if __name__ == "__main__":
     if __name__ == "__main__":
         SHEET_ID = "1axlwmzPA49rYkqXh7zHvAtSP-TKbM0ijGYBPRflLSWw"
-        GID = "418553327"  # specific tab
+        GID = "1793433759"  # specific tab
         
         # Configuration
         OUTPUT_DIR = "bayesian_dataset"  # or wherever you want to save teams
-        BATTLE_FORMAT = "gen9vgc2025regi"  # or your target format
+        BATTLE_FORMAT = "gen9vgc2025rega"  # or your target format
         
         paste_links = extract_pokepaste_links(SHEET_ID, GID)
         print(f"Found {len(paste_links)} PokéPaste links")

@@ -696,7 +696,7 @@ def prompt_translate(sim: LocalSim,
     if battle.active_pokemon.fainted: # passive switching
         
         system_prompt = (
-            f"You are a pokemon battler in generation {sim.gen.gen} OU format Pokemon Showdown that targets to win the pokemon battle. Your {battle.active_pokemon.species} just fainted. Choose a suitable pokemon to continue the battle. Here are some tips:"
+            f"You are a pokemon battler in generation {sim.gen.gen} VGC format Pokemon Showdown that targets to win the pokemon battle. Your {battle.active_pokemon.species} just fainted. Choose a suitable pokemon to continue the battle. Here are some tips:"
             " Compare the speeds of your pokemon to the opposing pokemon, which determines who take the move first."
             " Consider the defense state and type-resistance of your pokemon when its speed is lower than the opposing pokemon."
             " Consider the move-type advantage of your pokemon pokemon when its speed is higher than the opposing pokemon.")
@@ -708,7 +708,7 @@ def prompt_translate(sim: LocalSim,
     else: # take a move or active switch
         
         system_prompt = (
-            f"You are a pokemon battler in generation {sim.gen.gen} OU format Pokemon Showdown that targets to win the pokemon battle. You can choose to take a move or switch in another pokemon. Here are some battle tips:"
+            f"You are a pokemon battler in generation {sim.gen.gen} VGC format Pokemon Showdown that targets to win the pokemon battle. You can choose to take a move or switch in another pokemon. Here are some battle tips:"
             " Use status-boosting moves like swordsdance, calmmind, dragondance, nastyplot strategically. The boosting will be reset when pokemon switch out."
             " Set traps like stickyweb, spikes, toxicspikes, stealthrock strategically."
             " When face to a opponent is boosting or has already boosted its attack/special attack/speed, knock it out as soon as possible, even sacrificing your pokemon."
@@ -1905,18 +1905,82 @@ def state_translate3(sim: LocalSim,
                 continue
             speed_prompt += (f"(slower than {mon.species})." if active_speed < opponent_speed else f"(faster than {mon.species}).")
         
-        active_pokemon_prompt = (
-            f"Your current pokemon:{battle.active_pokemon[idx].species},Type:{active_type},HP:{active_hp_fraction}%" +
-            (f"Status:{sim.check_status(active_status)}," if sim.check_status(active_status) else "" ) +
-            (f"Attack:{active_stats['atk']}," if active_boosts['atk']==0 else f"Attack:{round(active_stats['atk']*sim.boost_multiplier('atk', active_boosts['atk']))}({active_boosts['atk']} stage boosted),") +
-            (f"Defense:{active_stats['def']}," if active_boosts['def']==0 else f"Defense:{round(active_stats['def']*sim.boost_multiplier('def', active_boosts['def']))}({active_boosts['def']} stage boosted),") +
-            (f"Special attack:{active_stats['spa']}," if active_boosts['spa']==0 else f"Special attack:{round(active_stats['spa']*sim.boost_multiplier('spa', active_boosts['spa']))}({active_boosts['spa']} stage boosted),") +
-            (f"Special defense:{active_stats['spd']}," if active_boosts['spd']==0 else f"Special defense:{round(active_stats['spd']*sim.boost_multiplier('spd', active_boosts['spd']))}({active_boosts['spd']} stage boosted),") +
-            (f"Speed:{active_stats['spe']}" if active_boosts['spe']==0 else f"Speed:{round(active_stats['spe']*sim.boost_multiplier('spe', active_boosts['spe']))}({active_boosts['spe']} stage boosted),") +
-            speed_prompt +
-            (f"Ability:{active_ability}({ability_effect})," if ability_effect else f"Ability:{active_ability},") +
-            (f"Item:{active_item}" if active_item else "")
-        )
+        # If the format is VGC, summarize all active Pokémon for the player's side
+        if getattr(sim, "format", "").lower() == "vgc":
+            active_pokemon_prompt_list = []
+            # It is assumed that battle.active_pokemon is a list of active Pokémon in VGC
+            for i, poke in enumerate(battle.active_pokemon):
+                if poke is None:  # skip empty slot
+                    continue
+                stats = poke.stats
+                if stats['atk'] is None:
+                    stats = poke.base_stats
+                boosts = getattr(poke, "_boosts", {"atk":0,"def":0,"spa":0,"spd":0,"spe":0})
+                hp_fraction = round(poke.current_hp / poke.max_hp * 100)
+                status = poke.status
+                type_str = ""
+                if poke.type_1:
+                    type_str += poke.type_1.name.capitalize()
+                    if poke.type_2:
+                        type_str = type_str + " and " + poke.type_2.name.capitalize()
+                try:
+                    ability = sim.ability_effect[poke.ability]["name"]
+                    ability_effect = sim.ability_effect[poke.ability]["effect"]
+                except Exception:
+                    ability = poke.ability
+                    ability_effect = ""
+                if poke.item:
+                    try:
+                        item = sim.item_effect[poke.item]["name"]
+                        item_eff = sim.item_effect[poke.item]["effect"]
+                        item = f"{item}({item_eff})"
+                    except Exception:
+                        item = poke.item
+                else:
+                    item = ""
+                # calculate speed after boost
+                speed_stats = stats['spe']
+                if speed_stats is None:
+                    speed_stats = 0
+                boosted_speed = round(speed_stats*sim.boost_multiplier('spe', boosts['spe']))
+                type_speed_prompt = ""
+                if opponent_stats:  # attempt to give a per-opponent speed prompt
+                    for mon in battle.opponent_active_pokemon:
+                        if mon is None:
+                            continue
+                        # Note: You may want per-pokemon speed prompt here; here, use first opp only
+                        type_speed_prompt += (f"(slower than {mon.species})." if boosted_speed < opponent_speed else f"(faster than {mon.species}).")
+                active_pokemon_str = (
+                    f"Your current pokemon:{poke.species},Type:{type_str},HP:{hp_fraction}%"
+                    + (f"Status:{sim.check_status(status)}," if sim.check_status(status) else "")
+                    + (f"Attack:{stats['atk']}," if boosts['atk']==0 else f"Attack:{round(stats['atk']*sim.boost_multiplier('atk', boosts['atk']))}({boosts['atk']} stage boosted),")
+                    + (f"Defense:{stats['def']}," if boosts['def']==0 else f"Defense:{round(stats['def']*sim.boost_multiplier('def', boosts['def']))}({boosts['def']} stage boosted),")
+                    + (f"Special attack:{stats['spa']}," if boosts['spa']==0 else f"Special attack:{round(stats['spa']*sim.boost_multiplier('spa', boosts['spa']))}({boosts['spa']} stage boosted),")
+                    + (f"Special defense:{stats['spd']}," if boosts['spd']==0 else f"Special defense:{round(stats['spd']*sim.boost_multiplier('spd', boosts['spd']))}({boosts['spd']} stage boosted),")
+                    + (f"Speed:{stats['spe']}" if boosts['spe']==0 else f"Speed:{round(stats['spe']*sim.boost_multiplier('spe', boosts['spe']))}({boosts['spe']} stage boosted),")
+                    + type_speed_prompt
+                    + (f"Ability:{ability}({ability_effect})," if ability_effect else f"Ability:{ability},")
+                    + (f"Item:{item}" if item else "")
+                )
+                active_move_type_damage_prompt = move_type_damage_wrapper(poke, sim.gen.type_chart, opponent_type_list)
+                if active_move_type_damage_prompt:
+                    active_pokemon_str += active_move_type_damage_prompt
+                active_pokemon_prompt_list.append(active_pokemon_str)
+            active_pokemon_prompt = "\n".join(active_pokemon_prompt_list)
+        else:
+            # singles format logic (original)
+            active_pokemon_prompt = (
+                f"Your current pokemon:{battle.active_pokemon[idx].species},Type:{active_type},HP:{active_hp_fraction}%" +
+                (f"Status:{sim.check_status(active_status)}," if sim.check_status(active_status) else "" ) +
+                (f"Attack:{active_stats['atk']}," if active_boosts['atk']==0 else f"Attack:{round(active_stats['atk']*sim.boost_multiplier('atk', active_boosts['atk']))}({active_boosts['atk']} stage boosted),") +
+                (f"Defense:{active_stats['def']}," if active_boosts['def']==0 else f"Defense:{round(active_stats['def']*sim.boost_multiplier('def', active_boosts['def']))}({active_boosts['def']} stage boosted),") +
+                (f"Special attack:{active_stats['spa']}," if active_boosts['spa']==0 else f"Special attack:{round(active_stats['spa']*sim.boost_multiplier('spa', active_boosts['spa']))}({active_boosts['spa']} stage boosted),") +
+                (f"Special defense:{active_stats['spd']}," if active_boosts['spd']==0 else f"Special defense:{round(active_stats['spd']*sim.boost_multiplier('spd', active_boosts['spd']))}({active_boosts['spd']} stage boosted),") +
+                (f"Speed:{active_stats['spe']}" if active_boosts['spe']==0 else f"Speed:{round(active_stats['spe']*sim.boost_multiplier('spe', active_boosts['spe']))}({active_boosts['spe']} stage boosted),") +
+                speed_prompt +
+                (f"Ability:{active_ability}({ability_effect})," if ability_effect else f"Ability:{active_ability},") +
+                (f"Item:{active_item}" if active_item else "")
+            )
 
         
 
@@ -1948,15 +2012,17 @@ def state_translate3(sim: LocalSim,
         active_pokemon_prompt = active_pokemon_prompt + "Your team's side condition: " + side_condition_prompt + "\n"
 
     # Move, if battle.force_switch[idx], we can skip all this and just move on to switching out
-    if not battle.force_switch[idx] and battle.active_pokemon[idx] is not None:
-        move_prompt = f"Your {battle.active_pokemon[idx].species} has {len(battle.available_moves[idx])} moves:\n"
-        for i, move in enumerate(battle.available_moves[idx]):
-                        
+    def build_move_prompt_for_pokemon(pokemon, available_moves, active_stats, active_boosts, opponent_stats, sim, label=""):
+        prompt = f"Your {pokemon.species} has {len(available_moves)} moves"
+        if label:
+            prompt += f" ({label})"
+        prompt += ":\n"
+        for move in available_moves:
             try:
                 effect = sim.move_effect[move.id]
-            except:
+            except Exception:
                 effect = ""
-    
+
             if move.category.name == "SPECIAL":
                 active_spa = active_stats["spa"] * sim.boost_multiplier("spa", active_boosts["spa"])
                 opponent_spd = [opp_stats["spd"] * sim.boost_multiplier("spd", active_boosts["spd"]) for opp_stats in opponent_stats]
@@ -1967,27 +2033,50 @@ def state_translate3(sim: LocalSim,
                 opponent_def = [opp_stats["def"] * sim.boost_multiplier("def", active_boosts["def"]) for opp_stats in opponent_stats]
                 power = [round(active_atk / defense * move.base_power) for defense in opponent_def]
                 move_category = ""
-            else:   
+            else:
                 move_category = move.category.name.capitalize()
                 power = 0
 
-            move_prompt += (f"Move:{move.id},Type:{move.type.name.capitalize()}," +
-                            (f"{move_category}-move," if move_category else "") +
-                            f"Power:{power},Acc:{round(move.accuracy * sim.boost_multiplier('accuracy', active_boosts['accuracy'])*100)}%"
-                            )
-
+            prompt += (f"Move:{move.id},Type:{move.type.name.capitalize()},"
+                       f"{move_category + '-move,' if move_category else ''}"
+                       f"Power:{power},Acc:{round(move.accuracy * sim.boost_multiplier('accuracy', active_boosts['accuracy']) * 100)}%")
             if effect:
-                move_prompt += f",Effect:{effect}"
-            # whether is effective to the target.
+                prompt += f",Effect:{effect}"
+
             move_type_damage_prompt = ""
             for mon in battle.opponent_active_pokemon:
                 if mon is None:
                     continue
                 move_type_damage_prompt += move_type_damage_wrapper(mon, sim.gen.type_chart, [move.type.name]) + "\n"
             if move_type_damage_prompt and move.base_power:
-                move_prompt += f'({move_type_damage_prompt.split("is ")[-1][:-1]})\n'
+                prompt += f'({move_type_damage_prompt.split("is ")[-1][:-1]})\n'
             else:
-                move_prompt += "\n"
+                prompt += "\n"
+        return prompt
+
+    if not battle.force_switch[idx] and battle.active_pokemon[idx] is not None:
+        # If VGC (double battle format, i.e., format string contains "vgc"), include both active Pokémon's moves
+        if hasattr(battle, "format") and ("vgc" in battle.format.lower() or getattr(sim, "format", "").lower().startswith("vgc")) and len(battle.active_pokemon) > 1:
+            move_prompts = []
+            for i, poke in enumerate(battle.active_pokemon):
+                if poke is None:
+                    continue
+                available_moves = battle.available_moves[i]
+                poke_stats = poke.stats if poke.stats['atk'] is not None else poke.base_stats
+                poke_boosts = poke._boosts if hasattr(poke, "_boosts") else {"atk": 0, "def": 0, "spa": 0, "spd": 0, "spe": 0, "accuracy": 0}
+                move_prompts.append(build_move_prompt_for_pokemon(
+                    poke, available_moves, poke_stats, poke_boosts, opponent_stats, sim, label=f"Slot {i+1}"
+                ))
+            move_prompt = "\n".join(move_prompts)
+        else:
+            move_prompt = build_move_prompt_for_pokemon(
+                battle.active_pokemon[idx],
+                battle.available_moves[idx],
+                active_stats,
+                active_boosts,
+                opponent_stats,
+                sim
+            )
 
         moves = battle.available_moves[idx]
         action_prompt = f' Your current Pokemon: {battle.active_pokemon[idx].species}.\nChoose only from the following action choices:\n'

@@ -44,6 +44,7 @@ from pokechamp.minimax_optimizer import (
     OptimizedSimNode
 )
 from poke_env.player.local_simulation import LocalSim, SimNode
+from poke_env.player.local_vgc_simulation import LocalVGCSim, VGCSimNode
 from difflib import get_close_matches
 from pokechamp.prompts import get_number_turns_faint, get_status_num_turns_fnt, state_translate, get_gimmick_motivation
 
@@ -276,8 +277,10 @@ class LLMVGCPlayer(Player):
             self._teampreview_team_data = request["side"]["pokemon"]
             print(f"Stored teampreview team data: {len(self._teampreview_team_data)} Pokemon")
     
+    # returns a double battle order object
+    # within this method is a for loop that handles the decision for each active pokemon
     def choose_move(self, battle: AbstractBattle):
-        sim = LocalSim(battle, 
+        sim = LocalVGCSim(battle, 
                     self.move_effect,
                     self.pokemon_move_dict,
                     self.ability_effect,
@@ -325,6 +328,14 @@ class LLMVGCPlayer(Player):
                 for idx in range(len(battle.active_pokemon)):
                     if not battle.force_switch[idx]:
                         next_action[idx] = None
+        # for minimax, we will decide the move for both pokemon at the same
+        if self.prompt_algo == "minimax":
+            try:
+                return self.vgc_tree_search(retries, battle)
+            except Exception as e:
+                print(f'minimax step failed ({e}). Using dmg calc')
+                print(f'Exception: {e}', 'passed')
+                return self.choose_max_damage_move(battle)
 
         for idx, mon in enumerate(battle.active_pokemon):
             # Skip individual processing if we already handled the special case
@@ -479,7 +490,7 @@ class LLMVGCPlayer(Player):
             # Normal case: both moves and switches are available
             else:
                 constraint_prompt_io = f'''Choose the best action and your output MUST be a JSON like: {{"move":"<move_name>", "target":"<target_number>"}}{gimmick_output_format} or {{"switch":"<switch_pokemon_name>"}}
-Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
+                Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
                 constraint_prompt_cot = f'''Choose the best action by thinking step by step. Your thought should no more than 4 sentences. Your output MUST be a JSON like: {{"move":"<move_name>", "target":"<target_number>"}}{gimmick_output_format} or {{"switch":"<switch_pokemon_name>"}}. Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self. Available switches: {switches}\n'''
                 constraint_prompt_tot_1 = '''You MUST move or switch. Generate top-k (k<=3) best move or switch options. Your output MUST be a JSON like:{"option_1":{"action":"move","target":"<move_name>"}, ..., "option_k":{"action":"move","target":"<move_name>"}} or {"option_1":{"action":"switch","target":"<switch_pokemon_name>"}, ..., "option_k":{"action":"switch","target":"<switch_pokemon_name>"}}. Available moves: {moves}. Available switches: {switches}\n'''
                 constraint_prompt_tot_2 = '''You MUST move or switch. Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"move","target":"<move_name>"}} or {"decision":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
@@ -499,12 +510,12 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
                 next_action[idx] = self.sc(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions, idx=idx)
             if self.prompt_algo == "tot":
                 next_action[idx] = self.tot(retries, system_prompt, state_prompt_tot_1, state_prompt_tot_2, battle, sim, actions=actions, idx=idx)
-
+            
+           
         next_action = DoubleBattleOrder(first_order=next_action[0], second_order=next_action[1])
         print(next_action)
         return next_action
-
-        
+   
     def io(self, retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle: Battle, sim, dont_verify=False, actions=None, idx=0):
         next_action = None
         cot_prompt = 'In fewer than 3 sentences, let\'s think step by step:'
@@ -732,13 +743,41 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
             next_action = self.choose_max_damage_move(battle)
         return next_action
 
-    def estimate_matchup(self, sim: LocalSim, battle: Battle, mon: Pokemon, mon_opp: Pokemon, is_opp: bool=False) -> Tuple[Move, int]:
+    def estimate_matchup(self, sim: Union[LocalSim, LocalVGCSim], battle: Union[Battle, DoubleBattle], mon: Pokemon, mon_opp: Pokemon, is_opp: bool=False, pokemon_idx: int=0) -> Tuple[Optional[BattleOrder], int]:
+        """
+        Estimate the best move for a single Pokemon against an opponent.
+        
+        Args:
+            sim: Simulation instance (LocalSim or LocalVGCSim)
+            battle: Battle instance (Battle or DoubleBattle)
+            mon: The Pokemon to evaluate moves for
+            mon_opp: The opponent Pokemon to evaluate against
+            is_opp: Whether evaluating opponent moves
+            pokemon_idx: For DoubleBattle, which Pokemon slot (0 or 1)
+        
+        Returns:
+            Tuple of (best_move_order, turns_to_ko)
+        """
         hp_remaining = []
         moves = list(mon.moves.keys())
         if is_opp:
             moves = sim.get_opponent_current_moves(mon=mon)
-        if battle.active_pokemon.species == mon.species and not is_opp:
-            moves = [move.id for move in battle.available_moves]
+        
+        # Handle available moves - different for Battle vs DoubleBattle
+        if isinstance(battle, DoubleBattle):
+            # For DoubleBattle, check if this Pokemon matches the active Pokemon at pokemon_idx
+            active_pokemon_list = battle.active_pokemon if not is_opp else battle.opponent_active_pokemon
+            if pokemon_idx < len(active_pokemon_list) and active_pokemon_list[pokemon_idx] and active_pokemon_list[pokemon_idx].species == mon.species:
+                if pokemon_idx < len(battle.available_moves):
+                    moves = [move.id for move in battle.available_moves[pokemon_idx]]
+        else:
+            # For regular Battle
+            if battle.active_pokemon and battle.active_pokemon.species == mon.species and not is_opp:
+                moves = [move.id for move in battle.available_moves]
+        
+        if not moves:
+            return None, np.inf
+        
         for move_id in moves:
             move = Move(move_id, gen=sim.gen.gen)
             t = np.inf
@@ -748,16 +787,30 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
             else:
                 t = get_number_turns_faint(mon, move, mon_opp, sim, boosts1=mon._boosts.copy(), boosts2=mon_opp.boosts.copy())
             hp_remaining.append(t)
-            # _, hp2, _, _ = sim.calculate_remaining_hp(battle.active_pokemon, battle.opponent_active_pokemon, move, None)
-            # hp_remaining.append(hp2)
+        
         hp_best_index = np.argmin(hp_remaining)
         best_move = moves[hp_best_index]
         best_move_turns = hp_remaining[hp_best_index]
         best_move = Move(best_move, gen=sim.gen.gen)
         best_move = self.create_order(best_move)
+        
         # check special moves: tera/dyna
+        # Handle dynamax/tera - different for Battle vs DoubleBattle
+        can_dynamax = False
+        can_tera = False
+        if isinstance(battle, DoubleBattle):
+            can_dynamax_list = battle.can_dynamax if not is_opp else battle.opponent_can_dynamax
+            can_tera_list = battle.can_tera if not is_opp else battle.opponent_can_tera
+            if pokemon_idx < len(can_dynamax_list):
+                can_dynamax = can_dynamax_list[pokemon_idx]
+            if pokemon_idx < len(can_tera_list):
+                can_tera = can_tera_list[pokemon_idx] if isinstance(can_tera_list[pokemon_idx], bool) else bool(can_tera_list[pokemon_idx])
+        else:
+            can_dynamax = battle.can_dynamax if not is_opp else battle.opponent_can_dynamax
+            can_tera = battle.can_tera if not is_opp else battle.opponent_can_tera
+        
         # dyna for gen 8
-        if sim.battle._data.gen == 8 and sim.battle.can_dynamax:
+        if sim.battle._data.gen == 8 and can_dynamax:
             for move_id in moves:
                 move = Move(move_id, gen=sim.gen.gen).dynamaxed
                 if move.category != MoveCategory.STATUS:
@@ -766,7 +819,7 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
                         best_move = self.create_order(move, dynamax=True)
                         best_move_turns = t
         # tera for gen 9
-        elif sim.battle._data.gen == 9 and sim.battle.can_tera:
+        elif sim.battle._data.gen == 9 and can_tera:
             mon.terastallize()
             for move_id in moves:
                 move = Move(move_id, gen=sim.gen.gen)
@@ -780,33 +833,116 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
         return best_move, best_move_turns
 
     def dmg_calc_move(self, battle: AbstractBattle, return_move: bool=False):
-        sim = LocalSim(battle, 
-                    self.move_effect,
-                    self.pokemon_move_dict,
-                    self.ability_effect,
-                    self.pokemon_ability_dict,
-                    self.item_effect,
-                    self.pokemon_item_dict,
-                    self.gen,
-                    self._dynamax_disable,
-                    format=self.format
-        )
-        best_action = None
-        best_action_turns = np.inf
-        if battle.available_moves and not battle.active_pokemon.fainted:
-            # try moves and find hp remaining for opponent
-            mon = battle.active_pokemon
-            mon_opp = battle.opponent_active_pokemon
-            best_action, best_action_turns = self.estimate_matchup(sim, battle, mon, mon_opp)
-        if return_move:
-            if best_action is None:
-                return None, best_action_turns
-            return best_action.order, best_action_turns
-        if best_action_turns > 4:
-            return None, np.inf
-        if best_action is not None:
-            return best_action, best_action_turns
-        return self.choose_random_move(battle), 1
+        """
+        Calculate the best damage-dealing moves for the current battle state.
+        For VGC (DoubleBattle), returns moves for both active Pokemon.
+        For singles (Battle), returns a single move.
+        
+        Args:
+            battle: The battle instance (Battle or DoubleBattle)
+            return_move: If True, return raw move order instead of BattleOrder
+        
+        Returns:
+            For DoubleBattle: (DoubleBattleOrder, turns) where DoubleBattleOrder contains
+                moves for both Pokemon (None if fainted)
+            For Battle: (BattleOrder, turns) or (move_order, turns) if return_move=True
+        """
+        # Handle DoubleBattle (VGC)
+        if isinstance(battle, DoubleBattle):
+            sim = LocalVGCSim(battle, 
+                        self.move_effect,
+                        self.pokemon_move_dict,
+                        self.ability_effect,
+                        self.pokemon_ability_dict,
+                        self.item_effect,
+                        self.pokemon_item_dict,
+                        self.gen,
+                        self._dynamax_disable,
+                        format=self.format
+            )
+            
+            # Get active Pokemon (list of up to 2 Pokemon, can be None)
+            active_pokemon = battle.active_pokemon
+            opponent_active_pokemon = battle.opponent_active_pokemon
+            
+            # Evaluate moves for first Pokemon (slot 0)
+            move1 = None
+            move1_turns = np.inf
+            if len(active_pokemon) > 0 and active_pokemon[0] is not None and not active_pokemon[0].fainted:
+                if len(battle.available_moves) > 0 and len(battle.available_moves[0]) > 0:
+                    # Use first opponent Pokemon for evaluation (or None if no opponent)
+                    mon_opp_1 = opponent_active_pokemon[0] if len(opponent_active_pokemon) > 0 and opponent_active_pokemon[0] is not None else None
+                    if mon_opp_1 is not None:
+                        move1, move1_turns = self.estimate_matchup(sim, battle, active_pokemon[0], mon_opp_1, is_opp=False, pokemon_idx=0)
+            
+            # Evaluate moves for second Pokemon (slot 1)
+            move2 = None
+            move2_turns = np.inf
+            if len(active_pokemon) > 1 and active_pokemon[1] is not None and not active_pokemon[1].fainted:
+                if len(battle.available_moves) > 1 and len(battle.available_moves[1]) > 0:
+                    # Prefer second opponent Pokemon if available, otherwise use first
+                    mon_opp_2 = None
+                    if len(opponent_active_pokemon) > 1 and opponent_active_pokemon[1] is not None:
+                        mon_opp_2 = opponent_active_pokemon[1]
+                    elif len(opponent_active_pokemon) > 0 and opponent_active_pokemon[0] is not None:
+                        mon_opp_2 = opponent_active_pokemon[0]
+                    if mon_opp_2 is not None:
+                        move2, move2_turns = self.estimate_matchup(sim, battle, active_pokemon[1], mon_opp_2, is_opp=False, pokemon_idx=1)
+            
+            # Use the minimum turns (best case scenario)
+            best_turns = min(move1_turns, move2_turns) if move1 is not None or move2 is not None else np.inf
+            
+            if return_move:
+                if move1 is None and move2 is None:
+                    return None, best_turns
+                move1_order = move1.order if move1 is not None else None
+                move2_order = move2.order if move2 is not None else None
+                return (move1_order, move2_order), best_turns
+            
+            # Filter out moves that take too long (>4 turns)
+            if move1_turns > 4:
+                move1 = None
+            if move2_turns > 4:
+                move2 = None
+            
+            # If both moves are None, return random move
+            if move1 is None and move2 is None:
+                random_move = self.choose_random_move(battle)
+                return random_move, 1
+            
+            # Create DoubleBattleOrder
+            double_order = DoubleBattleOrder(first_order=move1, second_order=move2)
+            return double_order, best_turns
+        
+        # Handle regular Battle (singles)
+        else:
+            sim = LocalSim(battle, 
+                        self.move_effect,
+                        self.pokemon_move_dict,
+                        self.ability_effect,
+                        self.pokemon_ability_dict,
+                        self.item_effect,
+                        self.pokemon_item_dict,
+                        self.gen,
+                        self._dynamax_disable,
+                        format=self.format
+            )
+            best_action = None
+            best_action_turns = np.inf
+            if battle.available_moves and battle.active_pokemon and not battle.active_pokemon.fainted:
+                # try moves and find hp remaining for opponent
+                mon = battle.active_pokemon
+                mon_opp = battle.opponent_active_pokemon
+                best_action, best_action_turns = self.estimate_matchup(sim, battle, mon, mon_opp)
+            if return_move:
+                if best_action is None:
+                    return None, best_action_turns
+                return best_action.order, best_action_turns
+            if best_action_turns > 4:
+                return None, np.inf
+            if best_action is not None:
+                return best_action, best_action_turns
+            return self.choose_random_move(battle), 1
     
     
     SPEED_TIER_COEFICIENT = 0.1
@@ -890,41 +1026,102 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
         else:
             return None
     
-    def tree_search(self, retries, battle, sim=None, return_opp = False) -> BattleOrder:
-        # generate local simulation
-        root = SimNode(battle, 
-                        self.move_effect,
-                        self.pokemon_move_dict,
-                        self.ability_effect,
-                        self.pokemon_ability_dict,
-                        self.item_effect,
-                        self.pokemon_item_dict,
-                        self.gen,
-                        self._dynamax_disable,
-                        depth=1,
-                        format=self.format,
-                        prompt_translate=self.prompt_translate,
-                        sim=sim
-                        ) 
-        q = [
-                root
-            ]
-        leaf_nodes = []
-        # create node and add to q B times
+    def vgc_tree_search(self, retries, battle, sim=None, return_opp = False) -> DoubleBattleOrder:
+        """
+        Create a minimax tree of player/opponent action pairs
+        Actions will be of the form DoubleBattleOrder
+        Evalutates leaf nodes and determines best action based on score
+        """
         start_time = time.time()
+        root = VGCSimNode(battle=battle, 
+                          move_effect=self.move_effect,
+                          pokemon_move_dict=self.pokemon_move_dict,
+                          ability_effect=self.ability_effect,
+                          pokemon_ability_dict=self.pokemon_ability_dict,
+                          item_effect=self.item_effect,
+                          pokemon_item_dict=self.pokemon_item_dict,
+                          gen=self.gen,
+                          _dynamax_disable=self._dynamax_disable,
+                          depth=1,
+                          format=self.format,
+                          prompt_translate=self.prompt_translate,
+                          sim=sim
+                          )
+        # get battle state information for LLM decision
+        system_prompt, state_prompt, _, _, _, _, _ = root.simulation.get_player_prompt()
+        if not battle.active_pokemon.fainted and len(battle.available_moves) > 0:
+            # get dmg calc move for potential early return
+            dmg_calc_out, dmg_calc_turns = self.dmg_calc_move(battle)
+            if dmg_calc_out is not None:
+                try:
+                    # Ask LLM to choose between damage calculator tool or minimax search upfront
+                    tool_prompt = '''Based on the current battle state, evaluate whether to use the damage calculator tool or the minimax tree search method. Consider the following factors:
+
+                    1. Damage calculator advantages:
+                    - Quick and efficient for finding optimal damaging moves
+                    - Useful when a clear type advantage or high-power move is available
+                    - Effective when the opponent is not switching and current pokemon is likely to KO opponent
+
+                    2. Minimax tree search advantages:
+                    - Can model opponent behavior and predict future moves
+                    - Useful in complex situations with multiple viable options
+                    - Effective when long-term strategy is crucial
+
+                    3. Current battle state:
+                    - Remaining Pokémon on each side
+                    - Health of active Pokémon
+                    - Type matchups
+                    - Available moves and their effects
+                    - Presence of status conditions or field effects
+
+                    4. Uncertainty level:
+                    - How predictable is the opponent's next move?
+                    - Are there multiple equally viable options for your next move?
+
+                    Evaluate these factors and decide which method would be more beneficial in the current situation. Output your choice in the following JSON format:
+
+                    {"choice":"damage calculator"} or {"choice":"minimax"}'''
+
+                    state_prompt_io = state_prompt + tool_prompt
+                    llm_output = self.get_LLM_action(system_prompt=system_prompt,
+                                                    user_prompt=state_prompt_io,
+                                                    model=self.backend,
+                                                    temperature=0.6,
+                                                    max_tokens=100,
+                                                    json_format=True,
+                                                    battle=battle
+                                                    )
+                    # Load when llm does heavylifting for parsing
+                    llm_action_json = json.loads(llm_output)
+                    if 'choice' in llm_action_json.keys():
+                        if llm_action_json['choice'] != 'minimax':
+                            # LLM chose damage calculator - return it directly
+                            print("LLM chose damage calculator over minimax")
+                            if return_opp:
+                                try:
+                                    action_opp, _ = self.estimate_matchup(root.simulation, battle, 
+                                                                        battle.opponent_active_pokemon, 
+                                                                        battle.active_pokemon, is_opp=True)
+                                    return dmg_calc_out, self.create_order(action_opp) if action_opp else None
+                                except:
+                                    return dmg_calc_out, None
+                            return dmg_calc_out
+                except Exception as e:
+                    print(f'LLM choice failed ({e}), defaulting to minimax')
+        print("Using minimax tree search")
+
+        q = [root]
+        leaf_nodes = []
+
         while len(q) != 0:
             node = q.pop(0)
-            # choose node for expansion
-            # generate B actions
+            # get available actions efficiently
             player_actions = []
             system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, action_prompt_switch, action_prompt_move = node.simulation.get_player_prompt(return_actions=True)
-            # panic_move = self.check_timeout(start_time, battle)
-            # if panic_move is not None:
-            #     return panic_move
-            # end if terminal
+            # check if terminal node or reached depth limit
             if node.simulation.is_terminal() or node.depth == self.K:
                 try:
-                    # value estimation for leaf nodes
+                    # Use LLM value function for leaf nodes evaluation
                     value_prompt = 'Evaluate the score from 1-100 based on how likely the player is to win. Higher is better. Start at 50 points.' +\
                                     'Add points based on the effectiveness of current available moves.' +\
                                     'Award points for each pokemon remaining on the player\'s team, weighted by their strength' +\
@@ -940,187 +1137,97 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
                                                     temperature=self.temperature,
                                                     max_tokens=500,
                                                     json_format=True,
-                                                    llm=self.llm_value
+                                                    llm=self.llm_value,
+                                                    battle=battle
                                                     )
-                    # load when llm does heavylifting for parsing
+                    # Load when llm does heavylifting for parsing
                     llm_action_json = json.loads(llm_output)
                     node.hp_diff = int(llm_action_json['score'])
                 except Exception as e:
-                    node.hp_diff = node.simulation.get_hp_diff()                    
-                    print(e)
-                
-                leaf_nodes.append(node)
+                    print("LLM value function failed, using hp diff")
+                    #TODO implement HP diff scoring for leaf nodes
+                leaf_nodes.append(node) 
                 continue
-            # panic_move = self.check_timeout(start_time, battle)
-            # if panic_move is not None:
-            #     return panic_move
-            # estimate opp
-            try:
-                action_opp, opp_turns = self.estimate_matchup(node.simulation, node.simulation.battle, node.simulation.battle.opponent_active_pokemon, node.simulation.battle.active_pokemon, is_opp=True)
-            except:
-                action_opp = None
-                opp_turns = np.inf
-            ##############################
-            # generate players's action  #
-            ##############################
+
+            #--------------------------------------------------#
+            # Generate actions for PLAYER using a combination  #
+            # of damage calculator and LLM                     #
+            #--------------------------------------------------#
             if not node.simulation.battle.active_pokemon.fainted and len(battle.available_moves) > 0:
-                # get dmg calc move
+                # Get dmg calc move
                 dmg_calc_out, dmg_calc_turns = self.dmg_calc_move(node.simulation.battle)
                 if dmg_calc_out is not None:
-                    if dmg_calc_turns <= opp_turns:
-                        try:
-                            # ask LLM to use heuristic tool or minimax search
-                            tool_prompt = '''Based on the current battle state, evaluate whether to use the damage calculator tool or the minimax tree search method. Consider the following factors:
-
-                                1. Damage calculator advantages:
-                                - Quick and efficient for finding optimal damaging moves
-                                - Useful when a clear type advantage or high-power move is available
-                                - Effective when the opponent's is not switching and current pokemon is likely to KO opponent
-
-                                2. Minimax tree search advantages:
-                                - Can model opponent behavior and predict future moves
-                                - Useful in complex situations with multiple viable options
-                                - Effective when long-term strategy is crucial
-
-                                3. Current battle state:
-                                - Remaining Pokémon on each side
-                                - Health of active Pokémon
-                                - Type matchups
-                                - Available moves and their effects
-                                - Presence of status conditions or field effects
-
-                                4. Uncertainty level:
-                                - How predictable is the opponent's next move?
-                                - Are there multiple equally viable options for your next move?
-
-                                Evaluate these factors and decide which method would be more beneficial in the current situation. Output your choice in the following JSON format:
-
-                                {"choice":"damage calculator"} or {"choice":"minimax"}'''
-
-                            state_prompt_io = state_prompt + tool_prompt
-                            llm_output = self.get_LLM_action(system_prompt=system_prompt,
-                                                            user_prompt=state_prompt_io,
-                                                            model=self.backend,
-                                                            temperature=0.6,
-                                                            max_tokens=100,
-                                                            json_format=True,
-                                                            )
-                            # load when llm does heavylifting for parsing
-                            llm_action_json = json.loads(llm_output)
-                            if 'choice' in llm_action_json.keys():
-                                if llm_action_json['choice']  != 'minimax':
-                                    if return_opp:
-                                        # use tool to save time and llm when move makes bigger difference
-                                        return dmg_calc_out, action_opp
-                                    return dmg_calc_out
-                        except:
-                            print('defaulting to minimax')
                     player_actions.append(dmg_calc_out)
-            # panic_move = self.check_timeout(start_time, battle)
-            # if panic_move is not None:
-            #     return panic_move
-            # get llm switch
-            if len(node.simulation.battle.available_switches) != 0:# or opp_turns < dmg_calc_turns):
-                state_action_prompt_switch = state_action_prompt + action_prompt_switch + '\nYou can only choose to switch this turn.\n'
-                constraint_prompt_io = 'Choose the best action and your output MUST be a JSON like: {"switch":"<switch_pokemon_name>"}.\n'
-                for i in range(2):
-                    action_llm_switch = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt_switch, node.simulation.battle, node.simulation)
-                    if len(player_actions) == 0:
-                        player_actions.append(action_llm_switch)
-                    elif action_llm_switch.message != player_actions[-1].message:
-                        player_actions.append(action_llm_switch)
+            try:
+                action_io = self.io(2, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, node.simulation.battle, node.simulation, actions=player_actions)
+                if action_io not in player_actions:
+                    player_actions.append(action_io)
+            except:
+                pass
 
-            if not node.simulation.battle.active_pokemon.fainted and len(battle.available_moves) > 0:# and not opp_turns < dmg_calc_turns:
-                # get llm move
-                state_action_prompt_move = state_action_prompt + action_prompt_move + '\nYou can only choose to move this turn.\n'
-                constraint_prompt_io = 'Choose the best action and your output MUST be a JSON like: {"move":"<move_name>"}.\n'
-                action_llm_move = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt_move, node.simulation.battle, node.simulation)
-                if len(player_actions) == 0:
-                    player_actions.append(action_llm_move)
-                elif action_llm_move.message != player_actions[0].message:
-                    player_actions.append(action_llm_move)
-            # panic_move = self.check_timeout(start_time, battle)
-            # if panic_move is not None:
-            #     return panic_move
-            ##############################
-            # generate opponent's action #
-            ##############################
+            #--------------------------------------------------#
+            # Generate actions for OPPONENT using a combination#
+            # of damage calculator and LLM                     #
+            #--------------------------------------------------#
             opponent_actions = []
-            tool_is_optimal = False
-            # dmg calc suggestion
-            # action_opp, opp_turns = self.estimate_matchup(node.simulation, node.simulation.battle, node.simulation.battle.opponent_active_pokemon, node.simulation.battle.active_pokemon, is_opp=True)
-            if action_opp is not None:
-                tool_is_optimal = True
-                opponent_actions.append(self.create_order(action_opp))
-            # heuristic matchup switch action
-            best_score = np.inf
-            best_action = None
-            for mon in node.simulation.battle.opponent_team.values():
-                if mon.species == node.simulation.battle.opponent_active_pokemon.species:
-                    continue
-                score = self._estimate_matchup(mon, node.simulation.battle.active_pokemon)
-                if score < best_score:
-                    best_score = score
-                    best_action = mon
-            if best_action is not None:
-                opponent_actions.append(self.create_order(best_action))
-            # panic_move = self.check_timeout(start_time, battle)
-            # if panic_move is not None:
-            #     return panic_move
-            # create opponent prompt from battle sim
-            system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o = node.simulation.get_opponent_prompt(system_prompt)
-            action_o = self.io(2, system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o, node.simulation.battle, node.simulation, dont_verify=True)
-            is_repeat_action_o = np.array([action_o.message == opponent_action.message for opponent_action in opponent_actions]).any()
-            if not is_repeat_action_o:
-                opponent_actions.append(action_o)
-            # panic_move = self.check_timeout(start_time, battle)
-            # if panic_move is not None:
-            #     return panic_move
-            # simulate outcome
-            if node.depth < self.K:
-                for action_p in player_actions:
-                    for action_o in opponent_actions:
-                        node_new = copy(node)
-                        node_new.simulation.battle = copy(node.simulation.battle)
-                        # if not tool_is_optimal:
-                        node_new.children = []
-                        node_new.depth = node.depth + 1
-                        node_new.action = action_p
-                        node_new.action_opp = action_o
-                        node_new.parent_node = node
-                        node_new.parent_action = node.action
-                        node.children.append(node_new)
-                        node_new.simulation.step(action_p, action_o)
-                        q.append(node_new)
+            try:
+                action_opp, opp_turns = self.estimate_matchup(
+                    node.simulation, node.simulation.battle, 
+                    node.simulation.battle.opponent_active_pokemon, 
+                    node.simulation.battle.active_pokemon, 
+                    is_opp=True
+                )
+            except:
+                action_opp = None
+                opp_turns = float('inf')
+            try:
+                system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o = node.simulation.get_opponent_prompt(system_prompt)
+                action_o = self.io(2, system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o, node.simulation.battle, node.simulation, dont_verify=True)
+                if action_o not in opponent_actions:
+                    opponent_actions.append(action_o)
+            except:
+                pass
+            
+            # create child nodes
+            if node.depth < self.K and player_actions and opponent_actions:
+                for action_p in player_actions[:2]:  # Limit to 2 player actions for performance
+                    for action_o in opponent_actions[:2]:  # Limit to 2 opponent actions for performance
+                        try:
+                            child_node = node.create_child_node(action_p, action_o)
+                            q.append(child_node)
+                        except Exception as e:
+                            print(f"Failed to create child node: {e}")
+                            continue
+            # Choose best action using original logic
+            def get_tree_action(root_node):
+                if len(root_node.children) == 0:
+                    return root_node.action, root_node.hp_diff, root_node.action_opp
+                    
+                score_dict = {}
+                action_dict = {}
+                opp_dict = {}
+                
+                for child in root_node.children:
+                    action = str(child.action.order)
+                    if action not in score_dict:
+                        score_dict[action] = []
+                        action_dict[action] = child.action
+                        opp_dict[action] = child.action_opp
+                    score_dict[action].append(child.hp_diff)
+                
+                # Use max score for each action
+                for action in score_dict:
+                    score_dict[action] = max(score_dict[action])
+                
+                best_action_str = max(score_dict, key=score_dict.get)
+                return action_dict[best_action_str], score_dict[best_action_str], opp_dict[best_action_str]
+            
+            action, _, action_opp = get_tree_action(root)   
+            end_time = time.time()    
 
-        # choose best action according to max or min rule
-        def get_tree_action(root: SimNode):
-            if len(root.children) == 0:
-                return root.action, root.hp_diff, root.action_opp
-            score_dict = {}
-            action_dict = {}
-            opp_dict = {}
-            for child in root.children:
-                action = str(child.action.order)
-                _, score, _ = get_tree_action(child)
-                if action in score_dict.keys():
-                    # imitation
-                    # score_dict[action] = score + score_dict[action]
-                    # minimax
-                    score_dict[action] = min(score, score_dict[action])
-                else:
-                    score_dict[action] = score
-                    action_dict[action] = child.action
-                    opp_dict[action] = child.action_opp
-            scores = list(score_dict.values())
-            best_action_str = list(action_dict.keys())[np.argmax(scores)]
-            return action_dict[best_action_str], score_dict[best_action_str], opp_dict[best_action_str]
-        
-        action, _, action_opp = get_tree_action(root)
-        end_time = time.time()
-        if return_opp:
-            return action, action_opp
-        return action
+            if return_opp:
+                return action, action_opp
+            return action         
 
     def tree_search_optimized(self, retries, battle, sim=None, return_opp=False) -> BattleOrder:
         """
@@ -1282,8 +1389,9 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
                     action_opp = None
                     opp_turns = float('inf')
                 
-                # Get player actions - damage calculator move
-                if not node.simulation.battle.active_pokemon.fainted and len(battle.available_moves) > 0:
+                # Get player actions - damage calculator move (for doubles, check first active pokemon)
+                player_active = node.simulation.battle.active_pokemon[0] if len(node.simulation.battle.active_pokemon) > 0 and node.simulation.battle.active_pokemon[0] else None
+                if player_active and not player_active.fainted and len(battle.available_moves) > 0 and len(battle.available_moves[0]) > 0:
                     # Get dmg calc move
                     dmg_calc_out, dmg_calc_turns = self.dmg_calc_move(node.simulation.battle)
                     if dmg_calc_out is not None:
@@ -1296,8 +1404,8 @@ Target numbers: 1=left opponent, 2=right opponent, 0=field effect, 0=self\n'''
                 
                 # Get more opponent actions via LLM (simplified)
                 try:
-                    system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o = node.simulation.get_opponent_prompt(system_prompt)
-                    action_o = self.io(2, system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o, node.simulation.battle, node.simulation, dont_verify=True)
+                    system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o = node.simulation.get_opponent_prompt(state_prompt)
+                    action_o = self.io(2, system_prompt_o, state_prompt_o, constraint_prompt_cot_o, constraint_prompt_io_o, state_action_prompt_o, node.simulation.battle, node.simulation, dont_verify=True, idx=0)
                     if action_o not in opponent_actions:
                         opponent_actions.append(action_o)
                 except:
