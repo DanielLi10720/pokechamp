@@ -443,14 +443,103 @@ class LocalVGCSim():
 
         return hp_diff
 
-    def get_player_prompt(self, return_actions=False, return_choices=False, idx=0):
+    def calculate_remaining_hp(self, 
+                               p1: Pokemon, 
+                               p2: Pokemon, 
+                               m1: Move, 
+                               m2: Move, 
+                               boosts1: Dict[str, int]=None, 
+                               boosts2: Dict[str, int]=None, 
+                               return_turns: bool=False,
+                               team=None,
+                               opp_team=None,
+                               ):
+        # calculate move damage based on stats IF NOT status change
+        # damage done by pokemon 1
+        d1, d2 = 0, 0
+        id1, id2 = None, None
+        if boosts1 is None:
+            boosts1 = p1._boosts
+        if boosts2 is None:
+            boosts2 = p2._boosts
+        if m1 != None:
+            id1 = m1.id
+            if m1.category != MoveCategory.STATUS:
+                d1 = self.calc_base_dmg(p1, p2, m1, boosts1=boosts1, boosts2=boosts2, team=team) 
+                # print(f'base damage 1: {d1}')
+                d1 = self.modify_damage(d1, p1, p2, m1, m2)
+                # print(f'modified damage 1: {d1}')
+        # damage done by pokemon 2
+        if m2 != None:
+            id2 = m2.id
+            if m2.category != MoveCategory.STATUS:
+                d2 = self.calc_base_dmg(p2, p1, m2, boosts1=boosts2, boosts2=boosts1, team=opp_team) 
+                # print(f'base damage 2: {d2}')
+                d2 = self.modify_damage(d2, p2, p1, m2, m1)
+                # print(f'modified damage 2: {d2}')
+        # get HP
+        stats1 = p1.calculate_stats(battle_format=self.format)
+        hp1_total = stats1['hp']
+        hp1 = p1.current_hp_fraction * hp1_total
+        stats2 = p2.calculate_stats(battle_format=self.format)
+        hp2_total = stats2['hp']
+        hp2 = p2.current_hp_fraction * hp2_total
+        turns_to_faint = hp2 / max(d1, 0.001)
+        
+        # apply in order of speed
+        p1_speed = round(stats1['spe'] * self.boost_multiplier('spe', boosts1['spe'])) * self.apply_protosynthesis(p1, 'spe')
+        p2_speed = round(stats2['spe'] * self.boost_multiplier('spe', boosts2['spe'])) * self.apply_protosynthesis(p2, 'spe')
+        p1_priority = False
+        if m1 is not None:
+            if m1.priority == 1:
+                p1_priority = True
+                if m2 is not None:
+                    if m1.priority == 1 and m2.priority == 1:
+                        p1_priority = False
+        if p1_speed > p2_speed or p1_priority:
+            # check healing
+            if m1 != None:
+                if m1.heal > 0:
+                    hp1 += m1.heal
+            hp2 = max(hp2 - d1, 0)
+            # check if HP is 0 before second move
+            if hp2 != 0:
+                # check healing
+                if m2 != None:
+                    if m2.heal > 0:
+                        hp2 += m2.heal
+                hp1 = max(hp1 - d2, 0)
+        else:
+            # check healing
+            if m2 != None:
+                if m2.heal > 0:
+                    hp2 += m2.heal
+            hp1 = max(hp1 - d2, 0)
+            # check if HP is 0 before second move
+            if hp1 != 0:
+                # check healing
+                if m1 != None:
+                    if m1.heal > 0:
+                        hp1 += m1.heal
+                hp2 = max(hp2 - d1, 0)
+        m1_success = ((p1_speed > p2_speed) or hp1 > 0) and m1 != None
+        m2_success = ((p1_speed <= p2_speed) or hp2 > 0) and m2 != None
+        # print(f'[DAMAGE PRED A] {p1.species} {id1} {p2.species} {id2}')
+        # print(f'[DAMAGE PRED B] {d1} {d2} {hp1} {hp2}')
+        hp1 = int(hp1 / hp1_total * 100)
+        hp2 = int(hp2 / hp2_total * 100)
+        if return_turns:
+            return hp1, hp2, m1_success, m2_success, turns_to_faint
+        return hp1, hp2, m1_success, m2_success
+
+    def get_player_prompt(self, return_actions=False, return_choices=False, idx=0, next_action=None):
         # For doubles, idx specifies which active pokemon (0 or 1)
         if return_actions:
-            system_prompt, state_prompt, state_action_prompt, action_prompt_switch, action_prompt_move = self.prompt_translate(self, self.battle, return_actions=return_actions, idx=idx)
+            system_prompt, state_prompt, state_action_prompt, action_prompt_switch, action_prompt_move = self.prompt_translate(self, self.battle, return_actions=return_actions, idx=idx, next_action=next_action)
         elif return_choices:
-            system_prompt, state_prompt, state_action_prompt, action_choice_switch, action_choice_move = self.prompt_translate(self, self.battle, return_choices=return_choices, idx=idx)
+            system_prompt, state_prompt, state_action_prompt, action_choice_switch, action_choice_move = self.prompt_translate(self, self.battle, return_choices=return_choices, idx=idx, next_action=next_action)
         else:
-            system_prompt, state_prompt, state_action_prompt = self.prompt_translate(self, self.battle, idx=idx)
+            system_prompt, state_prompt, state_action_prompt = self.prompt_translate(self, self.battle, idx=idx, next_action=next_action)
 
         # Check if pokemon at idx is fainted or has no moves
         active_mon = self.battle.active_pokemon[idx] if idx < len(self.battle.active_pokemon) else None
@@ -469,6 +558,93 @@ class LocalVGCSim():
             return system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, action_choice_switch, action_choice_move
         return system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt
 
+    def get_opponent_current_moves(self, mon=None, return_switch=False, is_player=False, return_separate=False):
+        """
+        Retrieve the opponent's current possible moves (both confirmed and predicted) for doubles.
+        If is_player is True, return player active pokemon's moves.
+        mon: a Pokemon object (if None, use the first opponent active mon).
+        return_separate: if True, returns (confirmed_moves, predicted_moves)
+        """
+        if is_player:
+            return [move.id for move in self.battle.active_pokemon[0].moves.values()] if self.battle.active_pokemon and self.battle.active_pokemon[0] else []
+        # Choose target mon (active opponent pokemon)
+        opponent_acts = self.battle.opponent_active_pokemon
+        if mon is None:
+            mon = None
+            for poke in opponent_acts:
+                if poke is not None and not poke.fainted:
+                    mon = poke
+                    break
+            if mon is None:
+                mon = opponent_acts[0] if opponent_acts and opponent_acts[0] else None
+        if mon is None:
+            return []
+
+        # Get confirmed moves (from battle info)
+        confirmed_moves = []
+        if mon.moves:
+            for move in mon.moves.values():
+                confirmed_moves.append(move.id)
+
+        # Bayesian prediction only if "vgc" appears in format name
+        fmt = getattr(self, "format", "").lower()
+        is_vgc = "vgc" in fmt
+        bayesian_result = []
+        if is_vgc:
+            try:
+                bayesian_result = self._get_bayesian_move_predictions(mon)
+                if bayesian_result and len(bayesian_result) >= len(confirmed_moves):
+                    if return_separate:
+                        return confirmed_moves, bayesian_result[len(confirmed_moves):]
+                    return bayesian_result[:4]
+            except Exception:
+                pass  # fallback gracefully
+
+        # fallback: use canonical move sets if available
+        possible_moves = []
+        species = mon.species
+        if hasattr(self, "moves_set") and hasattr(self, "pokemon_move_dict"):
+            try:
+                if species in self.moves_set:
+                    possible_moves = [move_set['name'].lower().replace(' ', '').replace('-', '') for move_set in self.moves_set[species]['moves']]
+            except Exception:
+                if species in self.pokemon_move_dict:
+                    possible_moves = [m.lower().replace(' ', '').replace('-', '') for m in self.pokemon_move_dict[species]]
+        # Remove confirmed
+        possible_moves = [move for move in possible_moves if move not in confirmed_moves]
+
+        if return_separate:
+            return confirmed_moves, possible_moves
+        return confirmed_moves + possible_moves[:max(0, 4 - len(confirmed_moves))]
+
+    def _get_bayesian_move_predictions(self, mon):
+        """
+        Helper for Bayesian move prediction for a given mon (only applies if format contains 'vgc').
+        Returns e.g. ["move1", "move2", "move3", "move4"], sorted by probability.
+        """
+        if not hasattr(self, "predictor") or self.predictor is None:
+            return []
+        predictor = self.predictor
+        # Normalize mon.species
+        species_norm = mon.species.lower()
+        # Observe teammates (remaining opponent mons)
+        opponent_pokemon = [poke.species.lower() for poke in self.battle.opponent_team.values() if poke is not None]
+        observed_moves = [move.id for move in mon.moves.values()]
+        try:
+            probabilities = predictor.predict_component_probabilities(
+                species_norm,
+                teammates=opponent_pokemon,
+                observed_moves=observed_moves
+            )
+            all_moves_with_probs = []
+            if 'moves' in probabilities:
+                for move_name, prob in probabilities['moves']:
+                    battle_format_move = move_name.lower().replace(' ', '').replace('-', '')
+                    all_moves_with_probs.append((battle_format_move, prob))
+            all_moves_with_probs.sort(key=lambda x: x[1], reverse=True)
+            return [move for move, _ in all_moves_with_probs[:4]]
+        except Exception:
+            return observed_moves[:4]
     def get_opponent_prompt(self, state_prompt, return_actions=False):
         system_prompt = (
                 "You are a pokemon battler that targets to win the pokemon battle by predicting the action that the opposing battler will use. Your opponent can choose to take a move or switch in another pokemon. Here are some battle tips:"
@@ -1070,6 +1246,17 @@ class VGCSimNode():
                                     )
         else:
             self.simulation = sim
+        # Store parameters for create_child_node
+        self.move_effect = move_effect
+        self.pokemon_move_dict = pokemon_move_dict
+        self.ability_effect = ability_effect
+        self.pokemon_ability_dict = pokemon_ability_dict
+        self.item_effect = item_effect
+        self.pokemon_item_dict = pokemon_item_dict
+        self.gen = gen
+        self._dynamax_disable = _dynamax_disable
+        self.format = format
+        self.prompt_translate = prompt_translate
         self.depth = depth
         self.action = None  # DoubleBattleOrder for player
         self.action_opp: DoubleBattleOrder = None  # DoubleBattleOrder for opponent
@@ -1077,4 +1264,48 @@ class VGCSimNode():
         self.parent_action = None
         self.hp_diff = 0
         self.children: List['VGCSimNode'] = []
+    
+    def create_child_node(self, player_action: DoubleBattleOrder, opp_action: DoubleBattleOrder) -> 'VGCSimNode':
+        """
+        Create a child node by stepping the battle forward with the given actions.
+        
+        Args:
+            player_action: DoubleBattleOrder for the player's actions
+            opp_action: DoubleBattleOrder for the opponent's actions
+        
+        Returns:
+            VGCSimNode: The new child node with the battle state after the step
+        """
+        # Create new battle state by deep copying
+        child_battle = deepcopy(self.simulation.battle)
+        
+        # Create child node with the copied battle
+        child_node = VGCSimNode(
+            child_battle,
+            self.move_effect,
+            self.pokemon_move_dict,
+            self.ability_effect,
+            self.pokemon_ability_dict,
+            self.item_effect,
+            self.pokemon_item_dict,
+            self.gen,
+            self._dynamax_disable,
+            depth=self.depth + 1,
+            format=self.format,
+            prompt_translate=self.prompt_translate,
+        )
+        
+        # Set the actions for this node
+        child_node.action = player_action
+        child_node.action_opp = opp_action
+        child_node.parent_node = self
+        child_node.parent_action = self.action
+        
+        # Step the simulation forward with the given actions
+        child_node.simulation.step(player_action, opp_action)
+        
+        # Add child to parent's children list
+        self.children.append(child_node)
+        
+        return child_node
 

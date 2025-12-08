@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Union, TYPE_CHECKING
 import numpy as np
 from poke_env.environment.battle import Battle
 from poke_env.environment.move import Move
@@ -7,6 +7,9 @@ from poke_env.environment.pokemon import Pokemon
 from poke_env.environment.side_condition import SideCondition
 from poke_env.player.local_simulation import LocalSim, move_type_damage_wrapper
 from poke_env.player.battle_order import DefaultBattleOrder
+
+if TYPE_CHECKING:
+    from poke_env.player.local_vgc_simulation import LocalVGCSim
 
 def get_turn_summary(sim: LocalSim,
                      battle: Battle,
@@ -154,7 +157,7 @@ def get_macro_strat(sim: LocalSim,
 def get_number_turns_faint(mon: Pokemon,
                            move: Move,
                            mon_opp: Pokemon,
-                           sim: LocalSim,
+                           sim: Union[LocalSim, 'LocalVGCSim'],  # type: ignore
                            boosts1: Dict[str, int]=None, 
                            boosts2: Dict[str, int]=None, 
                            return_hp=False,
@@ -171,7 +174,7 @@ def get_number_turns_faint(mon: Pokemon,
 def get_status_num_turns_fnt(mon: Pokemon,
                              move: Move,
                              mon_opp: Pokemon,
-                             sim: LocalSim,
+                             sim: Union[LocalSim, 'LocalVGCSim'],  # type: ignore
                              boosts: Dict[str, int]=None, 
                              ) -> int:
     def boost(stat: str, amount: float):
@@ -2160,7 +2163,7 @@ def state_translate3(sim: LocalSim,
                 for pokemon in battle.available_switches[idx]
                 if pokemon.species not in [
                     action.order.species
-                    for action in next_action
+                    for action in (next_action if next_action is not None else [])
                     if action is not None and not isinstance(action, DefaultBattleOrder) and isinstance(action.order, Pokemon)
                 ]
             ]
